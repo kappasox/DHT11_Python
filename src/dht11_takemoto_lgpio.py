@@ -45,7 +45,7 @@
 
 
 import time
-from gpiozero import DigitalInputDevice, DigitalOutputDevice
+import lgpio
 
 class DHT11MissingDataError(Exception): 
     pass
@@ -55,54 +55,74 @@ class DHT11CRCError(Exception):
 
 
 class DHT11:
-    'DHT11 sensor reader class for Raspberry Pi using gpiozero'
+    'DHT11 sensor reader class for Raspberry Pi using lgpio'
 
     def __init__(self, pin):
         self.__pin = pin
+        self.__h = lgpio.gpiochip_open(0)  # Open gpiochip0
 
     def read(self):
-        # DHT11プロトコルに従いピン制御
-        # 1. 出力でHIGH
-        out = DigitalOutputDevice(self.__pin)
-        out.on()
-        time.sleep(0.58)
-        # 2. 出力でLOW
-        out.off()
-        time.sleep(0.02)
-        out.close()
+        # Set pin as output
+        lgpio.gpio_claim_output(self.__h, self.__pin)
+        # send initial high
+        self.__send_and_sleep(1, 0.58)  # HIGH
 
-        # 3. 入力に切り替え（プルアップ）
-        inp = DigitalInputDevice(self.__pin, pull_up=True)
+        # pull down to low
+        self.__send_and_sleep(0, 0.02)  # LOW
 
-        # 4. データ収集
-        data = self.__collect_input(inp)
-        inp.close()
+        # change to input using pull up
+        #lgpio.gpio_claim_input(self.__h, self.__pin, lgpio.LGPIO_PULL_UP)
+        lgpio.gpio_claim_input(self.__h, self.__pin, lgpio.SET_PULL_UP)
 
-        # 5. データ解析
+        # collect data into an array
+        data = self.__collect_input()
+
+        # parse lengths of all data pull up periods
         pull_up_lengths = self.__parse_data_pull_up_lengths(data)
+
+        # if bit count mismatch, return error (4 byte data + 1 byte checksum)
         if len(pull_up_lengths) != 40:
             raise DHT11MissingDataError
+
+        # calculate bits from lengths of the pull up periods
         bits = self.__calculate_bits(pull_up_lengths)
+
+        # we have the bits, calculate bytes
         the_bytes = self.__bits_to_bytes(bits)
+
+        # calculate checksum and check
         checksum = self.__calculate_checksum(the_bytes)
         if the_bytes[4] != checksum:
             raise DHT11CRCError
+
+        # ok, we have valid data
+
+        # The meaning of the return sensor values
+        # the_bytes[0]: humidity int
+        # the_bytes[1]: humidity decimal
+        # the_bytes[2]: temperature int
+        # the_bytes[3]: temperature decimal
+
         temperature = the_bytes[2] + float(the_bytes[3]) / 10
         humidity = the_bytes[0] + float(the_bytes[1]) / 10
         return temperature, humidity, checksum
         
+    def __send_and_sleep(self, output, sleep):
+        lgpio.gpio_write(self.__h, self.__pin, output)
+        time.sleep(sleep)
 
-    # gpiozeroでは__send_and_sleep不要
 
-
-    def __collect_input(self, inp):
+    def __collect_input(self):
+        # collect the data while unchanged found
         unchanged_count = 0
+
+        # this is used to determine where is the end of the data
         max_unchanged_count = 100
+
         last = -1
         data = []
-        start = time.time()
         while True:
-            current = inp.value
+            current = lgpio.gpio_read(self.__h, self.__pin)
             data.append(current)
             if last != current:
                 unchanged_count = 0
@@ -111,9 +131,7 @@ class DHT11:
                 unchanged_count += 1
                 if unchanged_count > max_unchanged_count:
                     break
-            # タイムアウト防止
-            if time.time() - start > 0.1:
-                break
+
         return data
     
     def __parse_data_pull_up_lengths(self, data):
@@ -221,7 +239,7 @@ class DHT11:
         return checksum
     
     def close(self):
-        pass  # gpiozeroはclose不要
+        lgpio.gpiochip_close(self.__h)  # Close gpiochip0
  
 
 if __name__ == '__main__':
